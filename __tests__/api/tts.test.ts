@@ -17,11 +17,6 @@ function makeMockAudioStream(data = "fake-mp3") {
   return stream;
 }
 
-const mockRawToStream = jest.fn().mockReturnValue({
-  audioStream: makeMockAudioStream("ssml-mp3"),
-  metadataStream: null,
-});
-
 jest.mock("msedge-tts", () => ({
   MsEdgeTTS: jest.fn().mockImplementation(() => ({
     setMetadata: jest.fn().mockResolvedValue(undefined),
@@ -29,21 +24,9 @@ jest.mock("msedge-tts", () => ({
       audioStream: makeMockAudioStream(),
       metadataStream: null,
     }),
-    rawToStream: mockRawToStream,
   })),
   OUTPUT_FORMAT: { AUDIO_24KHZ_96KBITRATE_MONO_MP3: "mock_format" },
   ProsodyOptions: jest.fn().mockImplementation(() => ({ rate: "", pitch: "" })),
-}));
-
-// Mock Groq for SSML enrichment
-const mockGroqCreate = jest.fn().mockResolvedValue({
-  choices: [{ message: { content: "<emphasis>Hello</emphasis> world." } }],
-});
-jest.mock("groq-sdk", () => ({
-  __esModule: true,
-  default: jest.fn().mockImplementation(() => ({
-    chat: { completions: { create: mockGroqCreate } },
-  })),
 }));
 
 // ---------------------------------------------------------------------------
@@ -131,71 +114,34 @@ describe("POST /api/tts", () => {
     MsEdgeTTS.mockImplementationOnce(() => ({
       setMetadata: jest.fn().mockRejectedValue(new Error("Network failure")),
       toStream: jest.fn(),
-      rawToStream: jest.fn(),
     }));
     const res = await POST(makeRequest(VALID_BODY));
     expect(res.status).toBe(502);
     const data = await res.json();
     expect(data.error).toMatch(/TTS synthesis failed/i);
   });
-});
 
-// ---------------------------------------------------------------------------
-// SSML-enhanced path (documentContext provided)
-// ---------------------------------------------------------------------------
-describe("POST /api/tts — SSML-enhanced path", () => {
-  const OLD_ENV = process.env;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    process.env = { ...OLD_ENV, GROQ_API_KEY: "test-groq-key" };
-  });
-
-  afterAll(() => { process.env = OLD_ENV; });
-
-  const SSML_BODY = {
-    ...VALID_BODY,
-    documentContext: "Academic paper. Formal tone. Pause after statistics.",
-  };
-
-  it("calls rawToStream (SSML path) when documentContext is provided", async () => {
-    const res = await POST(makeRequest(SSML_BODY));
-    expect(res.status).toBe(200);
-    expect(mockRawToStream).toHaveBeenCalledTimes(1);
-    // The SSML passed should include the <speak> wrapper
-    const ssmlArg: string = mockRawToStream.mock.calls[0][0];
-    expect(ssmlArg).toContain("<speak");
-    expect(ssmlArg).toContain(VALID_BODY.voiceName);
-  });
-
-  it("falls back to toStream if Groq SSML generation fails", async () => {
-    mockGroqCreate.mockRejectedValueOnce(new Error("Rate limited"));
+  it("returns 502 when Edge TTS returns empty audio", async () => {
     const { MsEdgeTTS } = require("msedge-tts");
-    const mockToStream = jest.fn().mockReturnValue({
-      audioStream: (() => {
-        const { Readable } = require("stream");
-        const s = new Readable({ read() {} });
-        process.nextTick(() => { s.push(Buffer.from("fallback")); s.push(null); });
-        return s;
-      })(),
-      metadataStream: null,
-    });
+    const { Readable } = require("stream");
+    const emptyStream = new Readable({ read() {} });
+    process.nextTick(() => emptyStream.push(null)); // close with no data
     MsEdgeTTS.mockImplementationOnce(() => ({
       setMetadata: jest.fn().mockResolvedValue(undefined),
-      toStream: mockToStream,
-      rawToStream: jest.fn(),
+      toStream: jest.fn().mockReturnValue({ audioStream: emptyStream, metadataStream: null }),
     }));
-    const res = await POST(makeRequest(SSML_BODY));
-    expect(res.status).toBe(200);
-    expect(mockToStream).toHaveBeenCalledTimes(1);
+    const res = await POST(makeRequest(VALID_BODY));
+    expect(res.status).toBe(502);
+    expect((await res.json()).error).toMatch(/TTS synthesis failed/i);
   });
 
-  it("falls back to toStream if sanitiseSSML returns null", async () => {
-    // LLM returns empty string → sanitiseSSML returns null → fallback
-    mockGroqCreate.mockResolvedValueOnce({
-      choices: [{ message: { content: "" } }],
-    });
-    const res = await POST(makeRequest(SSML_BODY));
+  it("ignores documentContext field (SSML path removed)", async () => {
+    // documentContext is accepted but silently ignored — toStream is always used
+    const res = await POST(makeRequest({ ...VALID_BODY, documentContext: "Academic paper." }));
     expect(res.status).toBe(200);
+    const { MsEdgeTTS } = require("msedge-tts");
+    // toStream should have been called (not rawToStream)
+    const instance = MsEdgeTTS.mock.results[0].value;
+    expect(instance.toStream).toHaveBeenCalledTimes(1);
   });
 });

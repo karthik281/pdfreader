@@ -38,7 +38,6 @@ export default function Home() {
   const [parseProgress, setParseProgress] = useState({ current: 0, total: 0 });
   const [audio, setAudio] = useState<AudioState>(IDLE_AUDIO);
   const [error, setError] = useState<string | null>(null);
-  const [documentContext, setDocumentContext] = useState<string | null>(null);
 
   const cancelRef = useRef(false);
 
@@ -51,7 +50,6 @@ export default function Home() {
     setAllPages([]);
     setAudio(IDLE_AUDIO);
     setError(null);
-    setDocumentContext(null);
     setPdfName(file.name);
     setParseProgress({ current: 0, total: 0 });
 
@@ -63,28 +61,6 @@ export default function Home() {
       setAllPages(pages);
       setChapters(detected);
 
-      // Analyse the document style once — result is used to enrich TTS with SSML
-      const sampleText = pages
-        .slice(0, 5)
-        .map((p) => p.text)
-        .join("\n\n")
-        .slice(0, 4000);
-
-      if (sampleText.trim()) {
-        try {
-          const res = await fetch("/api/analyse-document", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sampleText }),
-          });
-          if (res.ok) {
-            const { documentContext: ctx } = await res.json();
-            setDocumentContext(ctx ?? null);
-          }
-        } catch {
-          // Non-fatal — plain TTS still works without context
-        }
-      }
     } catch (err) {
       console.error("PDF parse error:", err);
       setError(
@@ -103,7 +79,6 @@ export default function Home() {
 
     cancelRef.current = false;
     setError(null);
-    const usingSSML = !!documentContext;
     setAudio({ status: "processing", progress: 0, statusLabel: "Starting…" });
 
     try {
@@ -163,9 +138,7 @@ export default function Home() {
           setAudio({
             status: "processing",
             progress: sectionProgress(sIdx, totalSections, chunkProgress),
-            statusLabel: usingSSML
-              ? `Enhancing intonation — section ${sIdx + 1} of ${totalSections}…`
-              : `Generating audio — section ${sIdx + 1} of ${totalSections}…`,
+            statusLabel: `Generating audio — section ${sIdx + 1} of ${totalSections}…`,
           });
 
           const res = await fetch("/api/tts", {
@@ -176,7 +149,6 @@ export default function Home() {
               voiceName: voiceSettings.voiceName,
               speakingRate: voiceSettings.speakingRate,
               pitch: voiceSettings.pitch,
-              ...(documentContext ? { documentContext } : {}),
             }),
           });
 
@@ -204,7 +176,7 @@ export default function Home() {
       setAudio({ status: "error", progress: 0, statusLabel: msg });
       setError(`Audio generation failed: ${msg}`);
     }
-  }, [allPages, chapters, voiceSettings, documentContext]);
+  }, [allPages, chapters, voiceSettings]);
 
   // -------------------------------------------------------------------------
   // Helpers
