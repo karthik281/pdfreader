@@ -106,4 +106,37 @@ describe("POST /api/chat", () => {
     expect(roles).toContain("user");
     expect(roles).toContain("assistant");
   });
+
+  it("streams an error SSE event when the Groq stream throws mid-iteration", async () => {
+    async function* failingStream() {
+      yield { choices: [{ delta: { content: "partial" } }] };
+      throw new Error("Stream interrupted");
+    }
+    mockCreate.mockReturnValueOnce(failingStream());
+    const res  = await POST(makeRequest({ message: "Hi", documentContext: "", history: [] }));
+    expect(res.status).toBe(200); // outer try/catch not reached; error is inside ReadableStream
+    const body = await res.text();
+    expect(body).toContain("partial");
+    expect(body).toContain("error");
+  });
+
+  it("returns 502 when groq.chat.completions.create() itself throws", async () => {
+    mockCreate.mockRejectedValueOnce(new Error("Groq unavailable"));
+    const res  = await POST(makeRequest({ message: "Hi", documentContext: "", history: [] }));
+    expect(res.status).toBe(502);
+    const data = await res.json();
+    expect(data.error).toMatch(/chat failed/i);
+  });
+
+  it("includes documentContext in the system prompt when provided", async () => {
+    await POST(makeRequest({ message: "Hi", documentContext: "Interesting content here.", history: [] }));
+    const systemContent = mockCreate.mock.calls[0][0].messages[0].content as string;
+    expect(systemContent).toContain("Interesting content here.");
+  });
+
+  it("uses a generic system prompt when documentContext is empty", async () => {
+    await POST(makeRequest({ message: "Hi", documentContext: "", history: [] }));
+    const systemContent = mockCreate.mock.calls[0][0].messages[0].content as string;
+    expect(systemContent).toBe("You are a helpful assistant.");
+  });
 });

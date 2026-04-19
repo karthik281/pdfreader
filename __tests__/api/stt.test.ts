@@ -83,4 +83,26 @@ describe("POST /api/stt", () => {
       model: "whisper-large-v3-turbo",
     });
   });
+
+  it("returns 400 when audio exceeds 25 MB", async () => {
+    // 25 MB + 1 byte — just over the limit
+    const bigBuffer = new ArrayBuffer(25 * 1024 * 1024 + 1);
+    const res = await POST(makeAudioRequest(bigBuffer, "audio/webm"));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/25 MB/i);
+  });
+
+  it("passes the correct response_format to Groq", async () => {
+    await POST(makeAudioRequest(new Uint8Array([1, 2]).buffer));
+    expect(mockTranscribe.mock.calls[0][0]).toMatchObject({
+      response_format: "json",
+    });
+  });
+
+  it("derives the file extension from the MIME type", async () => {
+    await POST(makeAudioRequest(new Uint8Array([1, 2]).buffer, "audio/mp4"));
+    const file: File = mockTranscribe.mock.calls[0][0].file;
+    expect(file.name).toBe("recording.mp4");
+    expect(file.type).toBe("audio/mp4");
+  });
 });
