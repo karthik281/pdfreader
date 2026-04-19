@@ -4,10 +4,11 @@ import { useState, useCallback, useRef } from "react";
 import PDFUploader from "@/components/PDFUploader";
 import VoiceSelector from "@/components/VoiceSelector";
 import AudioPanel, { type AudioStatus } from "@/components/AudioPanel";
+import LiveReader from "@/components/LiveReader";
 import { parsePDF, detectChapters } from "@/lib/pdf-parser";
 import { chunkText, mergeMP3sToBlob } from "@/lib/audio";
 import type { Chapter, PageContent, VoiceSettings } from "@/types";
-import { BookOpen, Loader2, XCircle, X } from "lucide-react";
+import { BookOpen, Loader2, XCircle, X, Radio } from "lucide-react";
 
 const DEFAULT_VOICE: VoiceSettings = {
   gender: "FEMALE",
@@ -29,20 +30,23 @@ const IDLE_AUDIO: AudioState = {
   statusLabel: "",
 };
 
+type AppMode = "setup" | "live";
+
 export default function Home() {
-  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(DEFAULT_VOICE);
-  const [chapters, setChapters] = useState<Chapter[]>([]);
-  const [allPages, setAllPages] = useState<PageContent[]>([]);
-  const [pdfName, setPdfName] = useState("");
-  const [parsing, setParsing] = useState(false);
-  const [parseProgress, setParseProgress] = useState({ current: 0, total: 0 });
-  const [audio, setAudio] = useState<AudioState>(IDLE_AUDIO);
-  const [error, setError] = useState<string | null>(null);
+  const [mode, setMode]                         = useState<AppMode>("setup");
+  const [voiceSettings, setVoiceSettings]       = useState<VoiceSettings>(DEFAULT_VOICE);
+  const [chapters, setChapters]                 = useState<Chapter[]>([]);
+  const [allPages, setAllPages]                 = useState<PageContent[]>([]);
+  const [pdfName, setPdfName]                   = useState("");
+  const [parsing, setParsing]                   = useState(false);
+  const [parseProgress, setParseProgress]       = useState({ current: 0, total: 0 });
+  const [audio, setAudio]                       = useState<AudioState>(IDLE_AUDIO);
+  const [error, setError]                       = useState<string | null>(null);
 
   const cancelRef = useRef(false);
 
   // -------------------------------------------------------------------------
-  // PDF upload → parse → chapter detection (internal only)
+  // PDF upload → parse → chapter detection
   // -------------------------------------------------------------------------
   const handleFile = useCallback(async (file: File) => {
     setParsing(true);
@@ -50,17 +54,17 @@ export default function Home() {
     setAllPages([]);
     setAudio(IDLE_AUDIO);
     setError(null);
+    setMode("setup");
     setPdfName(file.name);
     setParseProgress({ current: 0, total: 0 });
 
     try {
-      const pages = await parsePDF(file, (current, total) =>
+      const pages    = await parsePDF(file, (current, total) =>
         setParseProgress({ current, total })
       );
       const detected = detectChapters(pages);
       setAllPages(pages);
       setChapters(detected);
-
     } catch (err) {
       console.error("PDF parse error:", err);
       setError(
@@ -88,9 +92,7 @@ export default function Home() {
       for (let sIdx = 0; sIdx < totalSections; sIdx++) {
         if (cancelRef.current) break;
 
-        const chapter = chapters[sIdx];
-
-        // --- Step 1: describe any image-heavy pages in this section ---
+        const chapter      = chapters[sIdx];
         const sectionPages = allPages.filter(
           (p) => p.pageNumber >= chapter.pageStart && p.pageNumber <= chapter.pageEnd
         );
@@ -101,25 +103,18 @@ export default function Home() {
 
           if (page.hasImages && page.imageDataUrl) {
             setAudio({
-              status: "processing",
-              progress: sectionProgress(sIdx, totalSections, 0),
+              status:      "processing",
+              progress:    sectionProgress(sIdx, totalSections, 0),
               statusLabel: `Describing images on page ${page.pageNumber}…`,
             });
-
             const res = await fetch("/api/describe-image", {
-              method: "POST",
+              method:  "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                imageDataUrl: page.imageDataUrl,
-                pageNumber: page.pageNumber,
-              }),
+              body:    JSON.stringify({ imageDataUrl: page.imageDataUrl, pageNumber: page.pageNumber }),
             });
-            if (res.ok) {
-              const { description } = await res.json();
-              sectionText += "\n\n" + description;
-            } else {
-              sectionText += `\n\nImage on page ${page.pageNumber} could not be described.`;
-            }
+            sectionText += res.ok
+              ? "\n\n" + (await res.json()).description
+              : `\n\nImage on page ${page.pageNumber} could not be described.`;
           } else if (page.text.trim()) {
             sectionText += "\n\n" + page.text;
           }
@@ -128,27 +123,25 @@ export default function Home() {
         sectionText = sectionText.trim();
         if (!sectionText) continue;
 
-        // --- Step 2: synthesise this section's text to audio ---
         const textChunks = chunkText(sectionText);
 
         for (let cIdx = 0; cIdx < textChunks.length; cIdx++) {
           if (cancelRef.current) break;
 
-          const chunkProgress = (cIdx + 1) / textChunks.length;
           setAudio({
-            status: "processing",
-            progress: sectionProgress(sIdx, totalSections, chunkProgress),
+            status:      "processing",
+            progress:    sectionProgress(sIdx, totalSections, (cIdx + 1) / textChunks.length),
             statusLabel: `Generating audio — section ${sIdx + 1} of ${totalSections}…`,
           });
 
           const res = await fetch("/api/tts", {
-            method: "POST",
+            method:  "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              text: textChunks[cIdx],
-              voiceName: voiceSettings.voiceName,
+            body:    JSON.stringify({
+              text:         textChunks[cIdx],
+              voiceName:    voiceSettings.voiceName,
               speakingRate: voiceSettings.speakingRate,
-              pitch: voiceSettings.pitch,
+              pitch:        voiceSettings.pitch,
             }),
           });
 
@@ -162,12 +155,8 @@ export default function Home() {
         }
       }
 
-      if (cancelRef.current) {
-        setAudio(IDLE_AUDIO);
-        return;
-      }
+      if (cancelRef.current) { setAudio(IDLE_AUDIO); return; }
 
-      // --- Step 3: merge every chunk from every section into one MP3 ---
       const audioUrl = mergeMP3sToBlob(allAudioChunks);
       setAudio({ status: "ready", progress: 100, statusLabel: "Ready", audioUrl });
     } catch (err) {
@@ -179,11 +168,27 @@ export default function Home() {
   }, [allPages, chapters, voiceSettings]);
 
   // -------------------------------------------------------------------------
-  // Helpers
+  // Derived
   // -------------------------------------------------------------------------
   const isGenerating = audio.status === "processing";
-  const hasPdf = chapters.length > 0 && !parsing;
+  const hasPdf       = chapters.length > 0 && !parsing;
 
+  // ── Live Read mode ────────────────────────────────────────────────────────
+  if (mode === "live") {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col">
+        <LiveReader
+          chapters={chapters}
+          allPages={allPages}
+          voiceSettings={voiceSettings}
+          pdfName={pdfName}
+          onExit={() => setMode("setup")}
+        />
+      </div>
+    );
+  }
+
+  // ── Setup mode ────────────────────────────────────────────────────────────
   return (
     <main className="min-h-screen bg-slate-50">
       {/* Header */}
@@ -192,7 +197,7 @@ export default function Home() {
           <BookOpen className="w-7 h-7 text-blue-600" />
           <div>
             <h1 className="font-bold text-slate-900 text-lg leading-tight">PDF to Audio</h1>
-            <p className="text-xs text-slate-400">Convert any PDF to a downloadable MP3</p>
+            <p className="text-xs text-slate-400">Convert any PDF to MP3, or listen live with Q&amp;A</p>
           </div>
         </div>
       </header>
@@ -246,8 +251,43 @@ export default function Home() {
           </div>
         )}
 
-        {/* Audio panel — shown once PDF is loaded */}
-        {hasPdf && (
+        {/* Mode selector — shown once PDF is loaded */}
+        {hasPdf && !isGenerating && audio.status === "idle" && (
+          <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+            <div className="px-6 py-5 border-b border-slate-100">
+              <p className="font-semibold text-slate-800 truncate">{pdfName}</p>
+              <p className="text-xs text-slate-400 mt-0.5">
+                {chapters.length} section{chapters.length !== 1 ? "s" : ""} detected — choose how to listen
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-slate-100">
+              <button
+                onClick={handleGenerate}
+                className="flex flex-col items-start gap-1 px-6 py-5 hover:bg-slate-50 transition-colors text-left"
+              >
+                <span className="text-sm font-semibold text-slate-700">Generate MP3</span>
+                <span className="text-xs text-slate-400">
+                  Pre-generate the whole PDF as a downloadable MP3 file.
+                </span>
+              </button>
+              <button
+                onClick={() => setMode("live")}
+                className="flex flex-col items-start gap-1 px-6 py-5 hover:bg-blue-50 transition-colors text-left"
+              >
+                <span className="flex items-center gap-1.5 text-sm font-semibold text-blue-600">
+                  <Radio className="w-4 h-4" />
+                  Live Read
+                </span>
+                <span className="text-xs text-slate-400">
+                  Listen section by section with real-time Q&amp;A and voice commands.
+                </span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Audio panel — shown when generating or ready */}
+        {hasPdf && (audio.status === "processing" || audio.status === "ready" || audio.status === "error") && (
           <AudioPanel
             pdfName={pdfName}
             totalSections={chapters.length}
@@ -265,7 +305,7 @@ export default function Home() {
             <BookOpen className="w-16 h-16 mx-auto mb-4 text-slate-200" />
             <p className="text-lg font-medium text-slate-400">Upload a PDF to get started</p>
             <p className="text-sm mt-1 text-slate-300">
-              The entire PDF is converted into one MP3 file
+              Generate a downloadable MP3, or start Live Read for interactive listening
             </p>
           </div>
         )}
@@ -275,10 +315,6 @@ export default function Home() {
 }
 
 /** Compute overall progress (0–100) given how far through section sIdx we are. */
-function sectionProgress(
-  sIdx: number,
-  total: number,
-  sectionFraction: number
-): number {
+function sectionProgress(sIdx: number, total: number, sectionFraction: number): number {
   return Math.round(((sIdx + sectionFraction) / total) * 100);
 }

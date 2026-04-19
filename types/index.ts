@@ -30,6 +30,11 @@ export interface VoiceSettings {
   pitch: number;        // -10 to +10 semitones
 }
 
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export const VOICE_OPTIONS: Record<"MALE" | "FEMALE", { name: string; label: string }[]> = {
   MALE: [
     { name: "en-US-GuyNeural",   label: "Guy (Neutral)" },
