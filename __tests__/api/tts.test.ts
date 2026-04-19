@@ -144,4 +144,32 @@ describe("POST /api/tts", () => {
     const instance = MsEdgeTTS.mock.results[0].value;
     expect(instance.toStream).toHaveBeenCalledTimes(1);
   });
+
+  it("escapes & < > in text before passing to toStream", async () => {
+    const res = await POST(makeRequest({ ...VALID_BODY, text: "A & B < C > D" }));
+    expect(res.status).toBe(200);
+    const { MsEdgeTTS } = require("msedge-tts");
+    const instance = MsEdgeTTS.mock.results[0].value;
+    const passedText: string = instance.toStream.mock.calls[0][0];
+    expect(passedText).toContain("&amp;");
+    expect(passedText).toContain("&lt;");
+    expect(passedText).toContain("&gt;");
+    expect(passedText).not.toContain("&B");   // raw ampersand gone
+  });
+
+  it("strips C0 control characters before passing to toStream", async () => {
+    // Null bytes and other control chars appear in poorly-extracted PDF text
+    const res = await POST(makeRequest({ ...VALID_BODY, text: "Hello\x00World\x01." }));
+    expect(res.status).toBe(200);
+    const { MsEdgeTTS } = require("msedge-tts");
+    const instance = MsEdgeTTS.mock.results[0].value;
+    const passedText: string = instance.toStream.mock.calls[0][0];
+    expect(passedText).not.toMatch(/[\x00-\x08]/);
+  });
+
+  it("returns 400 when text becomes empty after sanitization", async () => {
+    // Text that is entirely control characters → sanitized to empty
+    const res = await POST(makeRequest({ ...VALID_BODY, text: "\x00\x01\x02" }));
+    expect(res.status).toBe(400);
+  });
 });
